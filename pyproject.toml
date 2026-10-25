@@ -1,0 +1,36 @@
+[project]
+name = "admentum-mcp"
+version = "0.1.0"
+description = "Read-only MCP server that syncs Admentum school messages into local storage for a personal agent"
+authors = [
+    { name = "Andy Sjöholm", email = "andy.sjoholm+admentum-mcp@gmail.com" }
+]
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "filelock>=4.2.4",
+    "httpx>=0.28.1",
+    "markitdown[docx,pdf]>=0.1.9",
+    "mcp>=2.3.0",
+    "pillow>=13.0.0",
+    "pypdfium2>=5.14.0",
+    "tzdata>=2026.5",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[project.scripts]
+admentum-mcp = "admentum_mcp.__main__:main"
