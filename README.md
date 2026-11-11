@@ -4,7 +4,7 @@ A read-only [MCP](https://modelcontextprotocol.io) server that syncs your messag
 
 The server does the mechanical work: it logs in as you, downloads new messages and attachments, turns PDFs and Word files into text, and tracks which items the agent has handled. Your agent does the understanding: it summarizes, picks out dates and to-dos, and writes the digest.
 
-> **Status: testing and verification.** Syncing, storage, attachment extraction and all MCP tools work and are tested against a live account. Open checks are listed in `documentation/SPECIFICATION.md`, section 11.
+> **Status: Stable, and maintaining.** Syncing, storage, attachment extraction and all MCP tools work and are tested against a live account. Open checks are listed in `documentation/SPECIFICATION.md`, section 11.
 
 Unofficial and not affiliated with Admentum. The connector uses the same internal calls as the Admentum web app, which can change without notice.
 
