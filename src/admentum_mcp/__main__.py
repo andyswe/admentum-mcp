@@ -103,6 +103,25 @@ def cmd_sync(cfg: Config, args: argparse.Namespace) -> int:
     return 0 if result.get("result") in ("ok", "dry_run", "partial") else 1
 
 
+def cmd_sync_and_notify(cfg: Config, args: argparse.Namespace) -> int:
+    """One sync, then the webhook (spec 5.6); for cron. Exit 0 ok, 1 sync or delivery failed, 2 config."""
+    from .notify import notify_after_sync, webhook_from_env
+    from .sync import run_sync
+
+    hook = webhook_from_env(cfg)  # before logging in, so a config problem never costs a sync
+    source = make_source(cfg, args.source)
+    try:
+        result = run_sync(cfg, source, notify=lambda store, res: notify_after_sync(store, hook, res))
+    finally:
+        close = getattr(source, "close", None)
+        if close:
+            close()
+    print(json.dumps(result, indent=2))
+    if result.get("result") == "already_running":
+        return 0
+    return 0 if result.get("result") in ("ok", "partial") and not result["notify"]["failed"] else 1
+
+
 def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
     from .server import Inbox
 
@@ -161,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("serve", help="run the MCP server on stdio (default)")
     p_sync = sub.add_parser("sync", help="sync messages from the source")
     p_sync.add_argument("--dry-run", action="store_true")
+    sub.add_parser("sync-and-notify", help="sync, call the configured webhook if there is news, exit (for cron)")
     sub.add_parser("status", help="counts and health, as JSON")
     p_prune = sub.add_parser("prune", help="list (or with --apply delete) files of old seen items")
     p_prune.add_argument("--older-than-days", type=int, default=None)
@@ -184,10 +204,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.command in (None, "serve"):
         return cmd_serve(cfg, args)
-    if args.command == "sync":
+    if args.command in ("sync", "sync-and-notify"):
         setup_logging(cfg, stderr=True)
         try:
-            return cmd_sync(cfg, args)
+            return (cmd_sync if args.command == "sync" else cmd_sync_and_notify)(cfg, args)
         except ConfigError as e:
             print(f"config error: {e}", file=sys.stderr)
             return 2

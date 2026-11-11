@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_DATA_DIR = Path.home() / ".admentum-mcp"
@@ -57,6 +59,12 @@ class FeedsConfig:
 
 
 @dataclass(frozen=True)
+class NotifyConfig:
+    webhook_url: str = ""  # empty: sync-and-notify refuses to run
+    timeout_seconds: int = 10
+
+
+@dataclass(frozen=True)
 class Config:
     data_dir: Path = DEFAULT_DATA_DIR
     retention_days: int = 365
@@ -65,6 +73,7 @@ class Config:
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     feeds: FeedsConfig = field(default_factory=FeedsConfig)
     noise: tuple[Rule, ...] = ()
+    notify: NotifyConfig = field(default_factory=NotifyConfig)
 
 
 @dataclass(frozen=True)
@@ -82,7 +91,7 @@ CONFIG_TEMPLATE = """\
 # the leading "# " and edit the value, then restart the server.
 # `admentum-mcp config` prints this template, including settings added later.
 # Credentials never go here: set ADMENTUM_USERNAME and ADMENTUM_PASSWORD in the
-# environment of the server.
+# environment of the server (and ADMENTUM_WEBHOOK_SECRET for [notify]).
 
 # Where state.db, logs and synced files live. This file stays in
 # ~/.admentum-mcp even if the data is moved.
@@ -124,6 +133,16 @@ CONFIG_TEMPLATE = """\
 # Messages matching these rules (same shape as feeds.rules, using the
 # conversation subject and the message sender) are marked seen automatically.
 # rules = []
+
+[notify]
+# Webhook called by `admentum-mcp sync-and-notify` (for example from cron) when
+# new messages arrive or syncing starts or stops failing. Events carry IDs and
+# counts only and are signed (Standard Webhooks) with ADMENTUM_WEBHOOK_SECRET
+# from the environment. https, or plain http to a loopback host only.
+# Example: webhook_url = "http://127.0.0.1:8644/webhooks/admentum"
+# webhook_url = ""
+# Seconds to wait for the webhook to answer, per attempt.
+# timeout_seconds = 10
 """
 
 
@@ -167,6 +186,7 @@ def parse_config(data: dict[str, Any]) -> Config:
         limits=_limits(t.table("limits")),
         feeds=_feeds(t.table("feeds")),
         noise=_noise(t.table("noise")),
+        notify=_notify(t.table("notify")),
     )
     t.done()
     return cfg
@@ -221,6 +241,38 @@ def _noise(t: _Table) -> tuple[Rule, ...]:
     r = tuple(_rule(rt) for rt in t.tables("rules"))
     t.done()
     return r
+
+
+def _notify(t: _Table) -> NotifyConfig:
+    d = NotifyConfig()
+    url = t.get_str("webhook_url", d.webhook_url)
+    if url:
+        _check_webhook_url(url, t.key("webhook_url"))
+    r = NotifyConfig(webhook_url=url, timeout_seconds=t.get_int("timeout_seconds", d.timeout_seconds, minimum=1))
+    t.done()
+    return r
+
+
+def _check_webhook_url(url: str, key: str) -> None:
+    """https anywhere; plain http only to a loopback host (R-N5)."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        raise ConfigError(f"{key}: not a valid URL") from None
+    if parts.scheme not in ("http", "https") or not host:
+        raise ConfigError(f"{key}: expected an http(s) URL")
+    if parts.scheme == "http" and not _is_loopback(host):
+        raise ConfigError(f"{key}: plain http is only allowed to a loopback host; use https")
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _rule(t: _Table) -> Rule:

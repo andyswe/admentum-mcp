@@ -23,6 +23,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import ImageContent, TextContent
 
 from . import images
+from . import notify as notify_mod
 from . import prune as prune_mod
 from .config import Config, ConfigError
 from .files import DataDir
@@ -194,6 +195,7 @@ class Inbox:
                     "finished": self._when(last["finished_at"]), "result": last["result"], "error": last["error"]},
                 "thread_errors": thread_errors,
                 "sync_running": self._sync_running(),
+                "notify": notify_mod.notify_status(self.cfg, store),
                 "settings": self._settings(store),
             }
         return out

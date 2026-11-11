@@ -16,6 +16,7 @@ from typing import Any
 
 from filelock import FileLock, Timeout
 
+from . import notify as notify_mod
 from . import prune as prune_mod
 from .clean import html_to_text
 from .config import Config
@@ -63,8 +64,13 @@ def run_sync(
     dry_run: bool = False,
     clock: Callable[[], datetime] = utcnow,
     sleep: Callable[[float], None] = time.sleep,
+    notify: Callable[[Store, dict[str, Any]], dict[str, list[str]]] | None = None,
 ) -> dict[str, Any]:
-    """Run one sync. Returns counts (R-Y5) or {"result": "already_running"} (R-Y1)."""
+    """Run one sync. Returns counts (R-Y5) or {"result": "already_running"} (R-Y1).
+
+    With `notify`, it is called under the lock after the sync and its outcome is added as
+    `notify`; without it, a non-dry sync marks every item as announced (R-N2).
+    """
     data = DataDir(cfg.data_dir)
     data.ensure()
     lock = FileLock(str(data.lock), timeout=0, mode=0o600)
@@ -76,7 +82,13 @@ def run_sync(
     try:
         store = Store.open(data.state_db)
         try:
-            return _Sync(cfg, source, store, data, clock, sleep, dry_run).run()
+            result = _Sync(cfg, source, store, data, clock, sleep, dry_run).run()
+            if not dry_run:
+                if notify is None:
+                    notify_mod.advance(store)
+                else:
+                    result["notify"] = notify(store, result)
+            return result
         finally:
             store.close()
     finally:

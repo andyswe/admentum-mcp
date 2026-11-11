@@ -39,8 +39,26 @@ uv run admentum-mcp sync             # download new messages and attachments
 uv run admentum-mcp status           # counts, failures, unsupported file types
 uv run admentum-mcp prune            # list what retention would delete (add --apply to delete)
 uv run admentum-mcp config           # print every setting with its default
+uv run admentum-mcp sync-and-notify  # sync, call the webhook if there is news, exit (for cron)
 uv run admentum-mcp --source fake sync   # try it without an Admentum account
 ```
+
+## Notifications (webhook)
+
+Admentum has no push notifications, so to react to new messages, run `sync-and-notify` from cron. It syncs, POSTs to your webhook when new messages arrived, and exits. Set the URL in `config.toml`:
+
+```toml
+[notify]
+webhook_url = "http://127.0.0.1:8644/webhooks/admentum"   # https, or http to localhost only
+```
+
+and `ADMENTUM_WEBHOOK_SECRET` next to your login in `.env`. Requests are signed per [Standard Webhooks](https://www.standardwebhooks.com/) (Hermes' webhook platform verifies these). The body holds only item IDs and counts, never message text; the agent reads the messages through the MCP tools. You also get a `sync.failed` event once when syncing starts failing (for example after a password change) and `sync.recovered` when it works again. A failed delivery is retried on the next run. Messages the agent already fetched with its own `sync` are not announced.
+
+```cron
+*/15 7-21 * * *  cd /path/to/admentum-mcp && /path/to/uv run admentum-mcp sync-and-notify >/dev/null 2>>$HOME/.admentum-mcp/logs/cron.err
+```
+
+Exit code 0 means ok, 1 a failed sync or delivery, 2 a configuration error. Each run logs in to Admentum, so keep the interval modest; each sync also marks fetched conversations read.
 
 ## Connecting an agent
 

@@ -145,7 +145,7 @@ def _uncomment(template: str) -> str:
 def test_config_template_documents_every_setting_with_its_default() -> None:
     import tomllib
 
-    from admentum_mcp.config import CONFIG_TEMPLATE, Config, FeedsConfig, LimitsConfig, SyncConfig
+    from admentum_mcp.config import CONFIG_TEMPLATE, Config, FeedsConfig, LimitsConfig, NotifyConfig, SyncConfig
 
     assert parse_config(tomllib.loads(CONFIG_TEMPLATE)) == Config()  # as written: all defaults
     active = tomllib.loads(_uncomment(CONFIG_TEMPLATE))
@@ -156,6 +156,7 @@ def test_config_template_documents_every_setting_with_its_default() -> None:
         *(f"limits.{f}" for f in LimitsConfig.__dataclass_fields__),
         *(f"feeds.{f}" for f in FeedsConfig.__dataclass_fields__),
         "noise.rules",
+        *(f"notify.{f}" for f in NotifyConfig.__dataclass_fields__),
     }
     present = {f"{k}.{kk}" if isinstance(v, dict) else k for k, v in active.items() for kk in (v if isinstance(v, dict) else [None])}
     assert present == expected

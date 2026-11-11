@@ -19,7 +19,7 @@ A Python stdio MCP server that syncs Admentum conversations, every message in th
 
 - Python 3.12 (`.python-version`), uv, `pyproject.toml` + `uv.lock`.
 - **R-S1** On startup the server checks that every required module is importable (including MarkItDown's PDF and DOCX backends) and exits naming any missing package.
-- Libraries: `mcp` 2.x (`MCPServer`, stdio), `httpx`, `markitdown[pdf,docx]`, `pillow` and `pypdfium2` (images, R-V3), `beautifulsoup4`, `filelock`, `tzdata`; `sqlite3` and `tomllib` from the standard library; `pytest`.
+- Libraries: `mcp` 2.x (`MCPServer`, stdio), `httpx` (also the webhook), `markitdown[pdf,docx]`, `pillow` and `pypdfium2` (images, R-V3), `beautifulsoup4`, `filelock`, `tzdata`; `sqlite3` and `tomllib` from the standard library; `pytest`.
 
 ```
 src/admentum_mcp/
@@ -33,6 +33,7 @@ src/admentum_mcp/
   extract.py       # attachment text (5.3)
   images.py        # images and PDF pages for the agent (5.4)
   prune.py
+  notify.py        # webhook after sync-and-notify (5.6)
   source.py        # SchoolSource protocol, data classes, errors
   admentum.py      # the only Admentum-specific module (9)
   fake_source.py   # scriptable in-memory source for tests and `--source fake`
@@ -92,7 +93,7 @@ attachments(item_id NOT NULL REFERENCES items, source_ref NOT NULL /* meta_id */
             extract_status NOT NULL /* ok|failed|unsupported|download_failed */, error, attempts NOT NULL DEFAULT 0,
             PRIMARY KEY (item_id, source_ref))
 sync_runs(id INTEGER PK, started_at, finished_at, result /* ok|partial|error|dry_run */, counts_json, error)
-meta(key TEXT PK, value)   -- first_sync_at, which anchors the ingest cutoff
+meta(key TEXT PK, value)   -- first_sync_at (anchors the ingest cutoff); notify_through, notify_sync_failing_since, notify_last (5.6)
 ```
 
 ## 5. Behavior
@@ -152,6 +153,19 @@ The source returns raw HTML and decides `is_mine`. Errors are typed, never empty
 - **R-R3** Unseen items are never pruned; `status` counts them as `unseen_past_retention`.
 - **R-R5** Runs after every non-dry sync, and through the `prune` tool and CLI (default dry run).
 
+### 5.6 Webhook notification
+
+`admentum-mcp sync-and-notify` runs one sync, calls the configured webhook if there is something to report, and exits; it is meant for cron. Admentum has no push, so this polls. The server itself never syncs on its own (8).
+
+- **R-N1 New items.** After the sync, unseen, unpruned items downloaded after the watermark `meta.notify_through` are announced in one `items.new` event. Own and noise-rule items are seen at download (R-D5, R-Y6) and never announced.
+- **R-N2 At least once.** The watermark moves to the newest announced `downloaded_at` only after a 2xx, so a failed delivery is retried by the next run with the same `webhook-id`. Every other non-dry sync (the `sync` tool, CLI `sync`) moves it to the newest item without sending, so items the agent fetched itself are never announced and a webhook-triggered agent run cannot trigger another webhook. Dry runs and `already_running` send nothing and move nothing.
+- **R-N3 IDs and counts only.** `items.new`: `new_items`, `item_ids` (at most 100), `pending_total`; every event also has `type`, `sync_run`, `sent_at`. No subject, sender, group or body text: it is children's data (R-P6), and a receiver that pastes the payload into a prompt would bypass the untrusted markers (R-P4). The agent reads the items through the tools.
+- **R-N4 Signed** per [Standard Webhooks](https://www.standardwebhooks.com/): `webhook-id`, `webhook-timestamp` (Unix seconds), `webhook-signature: v1,<base64 HMAC-SHA256 of "{id}.{timestamp}.{body}">`; a `whsec_` secret is base64-decoded to the key, any other secret is used as raw bytes. `webhook-id` is `admentum-items-<hash of the item IDs>`, `admentum-sync-failed-<run>` or `admentum-sync-recovered-<run>`. JSON body, no redirects followed.
+- **R-N5 Configuration.** `notify.webhook_url` (https, or plain http to a loopback host) and `ADMENTUM_WEBHOOK_SECRET` from the environment; either missing → exit 2 before syncing. The URL and secret are never logged or shown; logs hold the event type, status code and attempt.
+- **R-N6 Sync health.** A sync with `result: error` (for example `AuthError` after a password change) sends `sync.failed` with `error` (the error class name only) once; the next `ok` or `partial` sync sends `sync.recovered` with `failing_since`. Each is retried by later runs until delivered.
+- **R-N7 Delivery.** Timeout `notify.timeout_seconds` per attempt; 3 attempts with backoff on connection errors, 429 and 5xx; other statuses fail at once. A failed delivery never fails or undoes the sync. The result adds `notify: {sent, failed}` (event types) and `status` shows the last delivery.
+- **R-N8 Exit codes:** 0 when the sync was `ok` or `partial` and nothing failed to deliver, or `already_running`; 1 when the sync failed or an event could not be delivered; 2 on a configuration error.
+
 ## 6. MCP tools
 
 ### 6.1 Conventions
@@ -177,7 +191,7 @@ The source returns raw HTML and decides `is_mine`. Errors are typed, never empty
 | `get_thread_context(id, n=3, max_chars=8000)` | Text: the `n` (1–10) items before item `id`, oldest first, each body wrapped and cut to `max_chars / n`, with attachment names. |
 | `mark_seen(ids)` | Marks 1–100 items seen (`seen_by = agent`) in one transaction; all or nothing, unknown IDs are named. `marked`, `already_seen`, `pending_total`. |
 | `prune(older_than_days=None, dry_run=true)` | `dry_run`, `older_than_days`, `count`, `items` (at most 100 listed); applying takes the sync lock. Maintenance; not for the agent (8). |
-| `status()` | Counts (threads, downloaded, pending, seen, partial and error items, pruned, `unseen_past_retention`, failed and not-downloaded attachments), unsupported types by MIME type and extension (with `viewable`), last sync, threads with errors, whether a sync is running, and `settings`: `retention_days`, `initial_lookback_days`, `fetched_since` (the date before which messages were never fetched; after the first sync), `timezone`, `max_attachment_mb`, and the number of `feed_rules` and `noise_rules`. Never `data_dir` (a local path) or rule patterns (they can hold names). |
+| `status()` | Counts (threads, downloaded, pending, seen, partial and error items, pruned, `unseen_past_retention`, failed and not-downloaded attachments), unsupported types by MIME type and extension (with `viewable`), last sync, threads with errors, whether a sync is running, `notify` (`configured`, the `last` delivery: time, event, result; `sync_failure_reported_since`), and `settings`: `retention_days`, `initial_lookback_days`, `fetched_since` (the date before which messages were never fetched; after the first sync), `timezone`, `max_attachment_mb`, and the number of `feed_rules` and `noise_rules`. Never `data_dir` (a local path) or rule patterns (they can hold names). |
 
 ## 7. Configuration and operation
 
@@ -211,15 +225,20 @@ rules = []                    # e.g. [ { subject = "(?i)veckobrev", sender = "" 
 
 [noise]
 rules = []                    # same shape as feeds.rules
+
+[notify]
+webhook_url = ""              # for sync-and-notify (5.6)
+timeout_seconds = 10
 ```
 
-Credentials come only from `ADMENTUM_USERNAME` and `ADMENTUM_PASSWORD` in the environment, never from config, arguments, prompts or agent instructions, and are never logged. The CLI and the probe also load `.env` from the working directory (set variables win); `.env` is git-ignored and `.env.sample` lists the names. In production they come from `env` in the agent's server registration.
+Credentials come only from `ADMENTUM_USERNAME` and `ADMENTUM_PASSWORD` (and the webhook secret from `ADMENTUM_WEBHOOK_SECRET`) in the environment, never from config, arguments, prompts or agent instructions, and are never logged. The CLI and the probe also load `.env` from the working directory (set variables win); `.env` is git-ignored and `.env.sample` lists the names. In production they come from `env` in the agent's server registration.
 
 ### 7.2 CLI
 
 `admentum-mcp` (or `python -m admentum_mcp`), with `--config <path>` and `--source fake` (fixture scenario, no Admentum) on any command:
 
 - `serve` (default): MCP over stdio; R-S1, R-S3, R-Y8; logs to the file only.
+- `sync-and-notify`: one sync, then the webhook (5.6); for cron. JSON output, exit codes R-N8.
 - `sync [--dry-run]`, `status`, `prune [--older-than-days N] [--apply]`: like the tools, JSON output.
 - `reset --yes`: deletes `state.db` and `data/` under the sync lock; config and logs stay.
 - `config`: prints the config template (every setting with its default); reads and creates nothing.
@@ -238,7 +257,7 @@ This repo delivers only the MCP server, used by a personal agent (for example [H
 - **MCP only.** Never give the agent file access to `data_dir`: raw files lack the markers, bypass seen state and pruning, and hold what the tools leave out (recipient lists naming other families, image metadata).
 - **Tools:** all except `prune`. `get_attachment_image` needs a model with image input.
 - **Knowledge lives with the agent** (dates, to-dos, facts in its own memory); the server keeps messages and seen state. Questions about earlier messages: `search`, then `get_item` for the hits.
-- **Assumed procedure:** `sync`, `list_pending`, then a few items per run: `get_item`, images or thread context only when needed, save the results, `mark_seen` (only after saving, so a crashed run shows the item again). Report urgent, then actions, then FYI, and say when items are left. Scheduling and delivery are the agent's; the server syncs only when `sync` is called.
+- **Assumed procedure:** `sync`, `list_pending`, then a few items per run: `get_item`, images or thread context only when needed, save the results, `mark_seen` (only after saving, so a crashed run shows the item again). Report urgent, then actions, then FYI, and say when items are left. Scheduling and delivery are the agent's; the server syncs only when `sync` is called, or when the user's cron runs `sync-and-notify`, whose webhook (5.6) can start an agent run (for Hermes, a webhook route with the same secret; with several profiles, routes live in the default profile's config with `profile: <name>` and are called at `/p/<name>/webhooks/<route>`; `cron_job` fires an existing scheduled job so webhook runs match scheduled ones).
 - **Example:** `examples/school-inbox/SKILL.md` (Agent Skills format): backlog skimming, a few items per run oldest first, the digest, a school profile (children with birth year and grade, groups from `to`, people by `sender_id`, routines, calendar, events, to-dos, the yearly class rollover), and answering from the profile with `search`. An example to adapt, not part of the server's interface.
 
 ## 9. Admentum protocol (`admentum.py`)
@@ -296,7 +315,7 @@ Accounts hold years of conversations; with the cutoff, a first sync opens only t
 
 ## 11. Verification status
 
-**Automated** (`uv run pytest`, no network): sync rules (bulletin replies over several syncs, idempotence, retries after a failed fetch, own messages, edits and deletions, out-of-order messages, crash safety, the lock, the cutoff, old threads with new replies, pruning, permissions), the connector against a mock Admentum (login failure, renewal and re-login, paging, typed errors, HTML instead of a file, rate-limit and deleted-file handling, group names), extraction (Swedish PDF and DOCX generated by `tests/docs.py`, scans, broken files, limits, duplicates, startup re-extraction), images (scaling, metadata and GPS removal, PDF pages), and every tool through an in-process MCP client plus a real stdio session that fails on stray stdout.
+**Automated** (`uv run pytest`, no network): sync rules (bulletin replies over several syncs, idempotence, retries after a failed fetch, own messages, edits and deletions, out-of-order messages, crash safety, the lock, the cutoff, old threads with new replies, pruning, permissions), the connector against a mock Admentum (login failure, renewal and re-login, paging, typed errors, HTML instead of a file, rate-limit and deleted-file handling, group names), webhook notification (events and watermark, retries, no content, failure and recovery events, signatures against the Standard Webhooks reference vector, URL rules, the CLI against a local HTTP receiver), extraction (Swedish PDF and DOCX generated by `tests/docs.py`, scans, broken files, limits, duplicates, startup re-extraction), images (scaling, metadata and GPS removal, PDF pages), and every tool through an in-process MCP client plus a real stdio session that fails on stray stdout.
 
 **Live** (October 2026): probe; dry run and full 365-day syncs on a real account; rows and files consistent, log free of content; real PDFs, Word files, images and scans; the tools through Claude Code as the agent.
 
@@ -304,5 +323,6 @@ Accounts hold years of conversations; with the cutoff, a first sync opens only t
 - ID stability over days (probe `--snapshot`, two runs days apart).
 - An agent-level run with the intended agent (Hermes): vision, the example skill, the school profile.
 - Noise rules (R-Y6) are implemented and tested but unused so far.
+- `sync-and-notify` from cron against the Hermes gateway's webhook route (signature accepted, agent run started).
 
 **Decided against:** OCR and language detection (the agent views images and reads any language); config-based child tagging (replaced by recipient groups, R-D9); quote stripping and period labels (R-P1).

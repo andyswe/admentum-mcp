@@ -43,6 +43,11 @@ Viewing images and scanned letters (`get_attachment_image`) requires a model wit
    - Then `mark_seen` for the item. Never mark an item seen before its facts are saved.
 4. Send the digest (below). If nothing was new on a scheduled run, send nothing.
 
+**Started by the webhook** (if the user runs `sync-and-notify` from cron): the event's `item_ids`
+are only a hint. Do the same run from step 1 (`sync` is cheap when nothing changed). For a
+`sync.failed` event, tell the user syncing with Admentum fails (`error`) and may need their login
+checked; for `sync.recovered`, say it works again.
+
 ## Digest
 
 ```
